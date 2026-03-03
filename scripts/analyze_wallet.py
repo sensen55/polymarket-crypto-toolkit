@@ -526,6 +526,116 @@ def compute_stats(alignment: list[dict], trigger: int) -> dict:
             "win_rate": s_wins / s_settled * 100 if s_settled > 0 else 0,
         }
 
+    # ── Hourly win rate (UTC) ──
+    hourly_stats: dict[int, dict] = {}
+    for a in alignment:
+        if a["trade_won"] is None:
+            continue
+        hour = datetime.fromtimestamp(a["trade_time"], tz=UTC).hour
+        if hour not in hourly_stats:
+            hourly_stats[hour] = {"wins": 0, "losses": 0}
+        if a["trade_won"]:
+            hourly_stats[hour]["wins"] += 1
+        else:
+            hourly_stats[hour]["losses"] += 1
+
+    # ── Bet size buckets vs win rate ──
+    size_buckets = {"$0-1": (0, 1), "$1-5": (1, 5), "$5-10": (5, 10), "$10-50": (10, 50), "$50+": (50, 1e9)}
+    size_bucket_stats: dict[str, dict] = {}
+    for label, (lo, hi) in size_buckets.items():
+        bucket_trades = [a for a in alignment if lo <= a["trade_usdc"] < hi and a["trade_won"] is not None]
+        bw = sum(1 for a in bucket_trades if a["trade_won"])
+        bl = len(bucket_trades) - bw
+        if bucket_trades:
+            size_bucket_stats[label] = {
+                "count": len(bucket_trades),
+                "wins": bw,
+                "losses": bl,
+                "win_rate": bw / len(bucket_trades) * 100,
+                "avg_size": sum(a["trade_usdc"] for a in bucket_trades) / len(bucket_trades),
+            }
+
+    # ── Entry timing buckets vs win rate ──
+    timing_buckets = {
+        "0-60s": (0, 60), "60-120s": (60, 120), "120-180s": (120, 180),
+        "180-240s": (180, 240), "240-300s": (240, 300),
+    }
+    timing_bucket_stats: dict[str, dict] = {}
+    for label, (lo, hi) in timing_buckets.items():
+        bucket_trades = [
+            a for a in alignment
+            if a["trade_won"] is not None
+            and lo <= (a["trade_time"] - a["market_ts"]) < hi
+            and 0 <= (a["trade_time"] - a["market_ts"]) <= 300
+        ]
+        tw = sum(1 for a in bucket_trades if a["trade_won"])
+        tl = len(bucket_trades) - tw
+        if bucket_trades:
+            timing_bucket_stats[label] = {
+                "count": len(bucket_trades), "wins": tw, "losses": tl,
+                "win_rate": tw / len(bucket_trades) * 100,
+            }
+
+    # ── Estimated P&L ──
+    total_pnl = 0.0
+    gross_profit = 0.0
+    gross_loss = 0.0
+    for a in alignment:
+        if a["trade_won"] is None:
+            continue
+        cost = a["trade_usdc"]
+        entry_price = a["trade_price"]
+        if entry_price <= 0 or cost <= 0:
+            continue
+        tokens = cost / entry_price
+        if a["trade_won"]:
+            profit = tokens - cost  # payout = tokens * 1.0, cost = tokens * price
+            total_pnl += profit
+            gross_profit += profit
+        else:
+            total_pnl -= cost
+            gross_loss += cost
+
+    # ── Post-win / post-loss behavior ──
+    post_win_stats = {"wins": 0, "losses": 0}
+    post_loss_stats = {"wins": 0, "losses": 0}
+    for i in range(1, len(alignment)):
+        prev = alignment[i - 1]["trade_won"]
+        curr = alignment[i]["trade_won"]
+        if prev is None or curr is None:
+            continue
+        if prev is True:
+            if curr:
+                post_win_stats["wins"] += 1
+            else:
+                post_win_stats["losses"] += 1
+        else:
+            if curr:
+                post_loss_stats["wins"] += 1
+            else:
+                post_loss_stats["losses"] += 1
+
+    # ── Wallet's own win/loss streaks ──
+    wallet_streaks: list[tuple[str, int]] = []  # (type, length)
+    current_streak_type = None
+    current_streak_len = 0
+    for a in alignment:
+        if a["trade_won"] is None:
+            continue
+        result_type = "W" if a["trade_won"] else "L"
+        if result_type == current_streak_type:
+            current_streak_len += 1
+        else:
+            if current_streak_type is not None:
+                wallet_streaks.append((current_streak_type, current_streak_len))
+            current_streak_type = result_type
+            current_streak_len = 1
+    if current_streak_type is not None:
+        wallet_streaks.append((current_streak_type, current_streak_len))
+
+    win_streaks = [length for stype, length in wallet_streaks if stype == "W"]
+    loss_streaks = [length for stype, length in wallet_streaks if stype == "L"]
+
     return {
         "total_btc_trades": total,
         "wins": wins,
@@ -561,6 +671,17 @@ def compute_stats(alignment: list[dict], trigger: int) -> dict:
         "avg_entry_price": avg_price,
         "avg_entry_seconds_into_window": avg_entry_offset,
         "win_rate_by_streak": win_rate_by_streak,
+        # New deep analysis fields
+        "hourly_stats": hourly_stats,
+        "size_bucket_stats": size_bucket_stats,
+        "timing_bucket_stats": timing_bucket_stats,
+        "estimated_pnl": total_pnl,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "post_win_stats": post_win_stats,
+        "post_loss_stats": post_loss_stats,
+        "wallet_win_streaks": win_streaks,
+        "wallet_loss_streaks": loss_streaks,
     }
 
 
@@ -633,6 +754,90 @@ def print_report(result: AnalysisResult, trigger: int):
             f"  {streak_len:>6}  {data['count']:>5}  {data['win_rate']:>7.1f}%  "
             f"{data['wins']}W/{data['losses']}L  {repo_str:>9}"
         )
+
+    # ── Estimated P&L ──
+    print("\n--- Estimated P&L ---")
+    pnl = s.get("estimated_pnl", 0)
+    gp = s.get("gross_profit", 0)
+    gl = s.get("gross_loss", 0)
+    pnl_sign = "+" if pnl >= 0 else ""
+    print(f"  Net P&L:      {pnl_sign}${pnl:,.2f}")
+    print(f"  Gross profit: +${gp:,.2f}")
+    print(f"  Gross loss:   -${gl:,.2f}")
+    if s["settled"] > 0:
+        print(f"  Avg P&L/trade: {pnl_sign}${pnl / s['settled']:.4f}")
+
+    # ── Hourly Win Rate ──
+    hourly = s.get("hourly_stats", {})
+    if hourly:
+        print("\n--- Win Rate by Hour (UTC) ---")
+        print(f"  {'Hour':>6}  {'Count':>5}  {'Win Rate':>8}  {'W/L':>10}  {'Bar'}")
+        for h in range(24):
+            if h not in hourly:
+                continue
+            hw = hourly[h]["wins"]
+            hl = hourly[h]["losses"]
+            ht = hw + hl
+            if ht == 0:
+                continue
+            wr = hw / ht * 100
+            bar = "#" * int(wr / 2)
+            print(f"  {h:>4}:00  {ht:>5}  {wr:>7.1f}%  {hw}W/{hl}L  {bar}")
+
+    # ── Bet Size vs Win Rate ──
+    sbs = s.get("size_bucket_stats", {})
+    if sbs:
+        print("\n--- Win Rate by Bet Size ---")
+        print(f"  {'Bucket':>8}  {'Count':>5}  {'Win Rate':>8}  {'W/L':>10}  {'Avg Size':>8}")
+        for label in ["$0-1", "$1-5", "$5-10", "$10-50", "$50+"]:
+            if label not in sbs:
+                continue
+            b = sbs[label]
+            print(
+                f"  {label:>8}  {b['count']:>5}  {b['win_rate']:>7.1f}%"
+                f"  {b['wins']}W/{b['losses']}L  ${b['avg_size']:>7.2f}"
+            )
+
+    # ── Entry Timing vs Win Rate ──
+    tbs = s.get("timing_bucket_stats", {})
+    if tbs:
+        print("\n--- Win Rate by Entry Timing ---")
+        print(f"  {'Window':>8}  {'Count':>5}  {'Win Rate':>8}  {'W/L':>10}")
+        for label in ["0-60s", "60-120s", "120-180s", "180-240s", "240-300s"]:
+            if label not in tbs:
+                continue
+            t = tbs[label]
+            print(f"  {label:>8}  {t['count']:>5}  {t['win_rate']:>7.1f}%  {t['wins']}W/{t['losses']}L")
+
+    # ── Post-Win / Post-Loss Behavior ──
+    pw = s.get("post_win_stats", {})
+    pl = s.get("post_loss_stats", {})
+    if pw.get("wins", 0) + pw.get("losses", 0) > 0 or pl.get("wins", 0) + pl.get("losses", 0) > 0:
+        print("\n--- Behavior After Win/Loss ---")
+        pw_total = pw["wins"] + pw["losses"]
+        pl_total = pl["wins"] + pl["losses"]
+        if pw_total > 0:
+            print(f"  After WIN:  {pw['wins']}W/{pw['losses']}L  ({pw['wins'] / pw_total * 100:.1f}% win rate)")
+        if pl_total > 0:
+            print(f"  After LOSS: {pl['wins']}W/{pl['losses']}L  ({pl['wins'] / pl_total * 100:.1f}% win rate)")
+
+    # ── Wallet's Own Streaks ──
+    ws = s.get("wallet_win_streaks", [])
+    ls_ = s.get("wallet_loss_streaks", [])
+    if ws or ls_:
+        print("\n--- Wallet Win/Loss Streaks ---")
+        if ws:
+            print(f"  Win streaks:  max={max(ws)}, avg={sum(ws)/len(ws):.1f}, count={len(ws)}")
+            ws_dist = Counter(ws)
+            for length in sorted(ws_dist):
+                if length >= 3:
+                    print(f"    {length}+ wins in a row: {ws_dist[length]}x")
+        if ls_:
+            print(f"  Loss streaks: max={max(ls_)}, avg={sum(ls_)/len(ls_):.1f}, count={len(ls_)}")
+            ls_dist = Counter(ls_)
+            for length in sorted(ls_dist):
+                if length >= 3:
+                    print(f"    {length}+ losses in a row: {ls_dist[length]}x")
 
     # Verdict
     print("\n--- Verdict ---")
