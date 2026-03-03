@@ -636,6 +636,178 @@ def compute_stats(alignment: list[dict], trigger: int) -> dict:
     win_streaks = [length for stype, length in wallet_streaks if stype == "W"]
     loss_streaks = [length for stype, length in wallet_streaks if stype == "L"]
 
+    # ── Direction switch analysis ──
+    # Build list of trades with valid bet directions
+    directed = [a for a in alignment if a["inferred_bet"] in ("up", "down")]
+
+    # Direction runs: consecutive bets in the same direction
+    direction_runs: list[dict] = []  # {dir, length, wins, losses}
+    if directed:
+        run_dir = directed[0]["inferred_bet"]
+        run_trades: list[dict] = [directed[0]]
+        for a in directed[1:]:
+            if a["inferred_bet"] == run_dir:
+                run_trades.append(a)
+            else:
+                rw = sum(1 for t in run_trades if t["trade_won"] is True)
+                rl = sum(1 for t in run_trades if t["trade_won"] is False)
+                direction_runs.append({
+                    "dir": run_dir, "length": len(run_trades),
+                    "wins": rw, "losses": rl,
+                })
+                run_dir = a["inferred_bet"]
+                run_trades = [a]
+        # Final run
+        rw = sum(1 for t in run_trades if t["trade_won"] is True)
+        rl = sum(1 for t in run_trades if t["trade_won"] is False)
+        direction_runs.append({
+            "dir": run_dir, "length": len(run_trades),
+            "wins": rw, "losses": rl,
+        })
+
+    run_lengths = [r["length"] for r in direction_runs]
+
+    # Run length distribution (bucketed)
+    run_len_buckets = {"1": 0, "2-3": 0, "4-10": 0, "11-30": 0, "31+": 0}
+    for rl_val in run_lengths:
+        if rl_val == 1:
+            run_len_buckets["1"] += 1
+        elif rl_val <= 3:
+            run_len_buckets["2-3"] += 1
+        elif rl_val <= 10:
+            run_len_buckets["4-10"] += 1
+        elif rl_val <= 30:
+            run_len_buckets["11-30"] += 1
+        else:
+            run_len_buckets["31+"] += 1
+
+    # Switch point analysis: what happens at direction changes
+    switch_after_losses = []  # consecutive losses right before switching
+    switch_first_trade_wins = 0
+    switch_first_trade_losses = 0
+    switch_avg_size_before = []
+    switch_avg_size_after = []
+
+    for i in range(1, len(directed)):
+        prev_dir = directed[i - 1]["inferred_bet"]
+        curr_dir = directed[i]["inferred_bet"]
+        if prev_dir == curr_dir:
+            continue
+        # This is a switch point
+        # Count consecutive losses just before the switch
+        consec_losses = 0
+        for j in range(i - 1, -1, -1):
+            if directed[j]["trade_won"] is False:
+                consec_losses += 1
+            else:
+                break
+        switch_after_losses.append(consec_losses)
+
+        # Win rate of the first trade after switching
+        if directed[i]["trade_won"] is True:
+            switch_first_trade_wins += 1
+        elif directed[i]["trade_won"] is False:
+            switch_first_trade_losses += 1
+
+        # Bet sizes around switch
+        if directed[i - 1]["trade_usdc"] > 0:
+            switch_avg_size_before.append(directed[i - 1]["trade_usdc"])
+        if directed[i]["trade_usdc"] > 0:
+            switch_avg_size_after.append(directed[i]["trade_usdc"])
+
+    # Continuation trade win rate (for comparison)
+    cont_wins = 0
+    cont_losses = 0
+    for i in range(1, len(directed)):
+        if directed[i]["inferred_bet"] == directed[i - 1]["inferred_bet"]:
+            if directed[i]["trade_won"] is True:
+                cont_wins += 1
+            elif directed[i]["trade_won"] is False:
+                cont_losses += 1
+
+    # Market outcome at switch: did the last market outcome match
+    # the NEW direction or the OLD direction?
+    switch_follows_market = 0
+    switch_against_market = 0
+    switch_market_unknown = 0
+    for i in range(1, len(directed)):
+        prev_dir = directed[i - 1]["inferred_bet"]
+        curr_dir = directed[i]["inferred_bet"]
+        if prev_dir == curr_dir:
+            continue
+        last_outcome = directed[i - 1].get("actual_outcome")
+        if not last_outcome:
+            switch_market_unknown += 1
+            continue
+        # Did the wallet switch TO the same direction as the last outcome?
+        if curr_dir == last_outcome:
+            switch_follows_market += 1
+        else:
+            switch_against_market += 1
+
+    # Run win rate: win rate of entire run by run length bucket
+    run_wr_by_bucket: dict[str, dict] = {}
+    for r in direction_runs:
+        rl_val = r["length"]
+        if rl_val == 1:
+            bucket = "1"
+        elif rl_val <= 3:
+            bucket = "2-3"
+        elif rl_val <= 10:
+            bucket = "4-10"
+        elif rl_val <= 30:
+            bucket = "11-30"
+        else:
+            bucket = "31+"
+        if bucket not in run_wr_by_bucket:
+            run_wr_by_bucket[bucket] = {"wins": 0, "losses": 0, "count": 0}
+        run_wr_by_bucket[bucket]["wins"] += r["wins"]
+        run_wr_by_bucket[bucket]["losses"] += r["losses"]
+        run_wr_by_bucket[bucket]["count"] += 1
+
+    direction_switch_stats = {
+        "total_switches": len(direction_runs) - 1 if len(direction_runs) > 1 else 0,
+        "total_runs": len(direction_runs),
+        "run_lengths": run_lengths,
+        "avg_run_length": (
+            sum(run_lengths) / len(run_lengths) if run_lengths else 0
+        ),
+        "max_run_length": max(run_lengths) if run_lengths else 0,
+        "run_len_buckets": run_len_buckets,
+        "run_wr_by_bucket": run_wr_by_bucket,
+        "switch_after_losses": switch_after_losses,
+        "avg_losses_before_switch": (
+            sum(switch_after_losses) / len(switch_after_losses)
+            if switch_after_losses else 0
+        ),
+        "switch_first_win": switch_first_trade_wins,
+        "switch_first_loss": switch_first_trade_losses,
+        "switch_first_wr": (
+            switch_first_trade_wins
+            / (switch_first_trade_wins + switch_first_trade_losses)
+            * 100
+            if (switch_first_trade_wins + switch_first_trade_losses) > 0
+            else 0
+        ),
+        "continuation_wins": cont_wins,
+        "continuation_losses": cont_losses,
+        "continuation_wr": (
+            cont_wins / (cont_wins + cont_losses) * 100
+            if (cont_wins + cont_losses) > 0 else 0
+        ),
+        "avg_size_before_switch": (
+            sum(switch_avg_size_before) / len(switch_avg_size_before)
+            if switch_avg_size_before else 0
+        ),
+        "avg_size_after_switch": (
+            sum(switch_avg_size_after) / len(switch_avg_size_after)
+            if switch_avg_size_after else 0
+        ),
+        "switch_follows_market": switch_follows_market,
+        "switch_against_market": switch_against_market,
+        "switch_market_unknown": switch_market_unknown,
+    }
+
     return {
         "total_btc_trades": total,
         "wins": wins,
@@ -682,6 +854,7 @@ def compute_stats(alignment: list[dict], trigger: int) -> dict:
         "post_loss_stats": post_loss_stats,
         "wallet_win_streaks": win_streaks,
         "wallet_loss_streaks": loss_streaks,
+        "direction_switch": direction_switch_stats,
     }
 
 
@@ -838,6 +1011,92 @@ def print_report(result: AnalysisResult, trigger: int):
             for length in sorted(ls_dist):
                 if length >= 3:
                     print(f"    {length}+ losses in a row: {ls_dist[length]}x")
+
+    # ── Direction Switch Analysis ──
+    ds = s.get("direction_switch", {})
+    if ds and ds.get("total_switches", 0) > 0:
+        print("\n--- Direction Switch Analysis ---")
+        print(f"  Total direction runs: {ds['total_runs']}")
+        print(f"  Total switches:       {ds['total_switches']}")
+        print(
+            f"  Avg run length:       {ds['avg_run_length']:.1f} "
+            f"(max: {ds['max_run_length']})"
+        )
+
+        # Run length distribution
+        rlb = ds.get("run_len_buckets", {})
+        if rlb:
+            print("\n  Run length distribution:")
+            for label in ["1", "2-3", "4-10", "11-30", "31+"]:
+                if rlb.get(label, 0) > 0:
+                    pct = rlb[label] / ds["total_runs"] * 100
+                    print(f"    {label:>5} trades: {rlb[label]:>4}x ({pct:.1f}%)")
+
+        # Win rate by run length
+        rwb = ds.get("run_wr_by_bucket", {})
+        if rwb:
+            print("\n  Win rate by run length:")
+            print(f"    {'Bucket':>7}  {'Runs':>4}  {'Win Rate':>8}  {'W/L'}")
+            for label in ["1", "2-3", "4-10", "11-30", "31+"]:
+                if label not in rwb:
+                    continue
+                b = rwb[label]
+                bt = b["wins"] + b["losses"]
+                if bt > 0:
+                    wr = b["wins"] / bt * 100
+                    print(
+                        f"    {label:>7}  {b['count']:>4}  "
+                        f"{wr:>7.1f}%  {b['wins']}W/{b['losses']}L"
+                    )
+
+        # Switch point win rate vs continuation
+        sw_total = ds["switch_first_win"] + ds["switch_first_loss"]
+        ct_total = ds["continuation_wins"] + ds["continuation_losses"]
+        if sw_total > 0 and ct_total > 0:
+            print("\n  Switch vs continuation:")
+            print(
+                f"    First trade after switch: "
+                f"{ds['switch_first_wr']:.1f}% "
+                f"({ds['switch_first_win']}W/{ds['switch_first_loss']}L)"
+            )
+            print(
+                f"    Continuation trades:      "
+                f"{ds['continuation_wr']:.1f}% "
+                f"({ds['continuation_wins']}W/"
+                f"{ds['continuation_losses']}L)"
+            )
+
+        # Losses before switch
+        avg_l = ds.get("avg_losses_before_switch", 0)
+        if avg_l > 0:
+            sal = ds.get("switch_after_losses", [])
+            loss_dist = Counter(sal)
+            print(f"\n  Avg consecutive losses before switch: {avg_l:.1f}")
+            print("  Loss count before switch distribution:")
+            for n in sorted(loss_dist):
+                print(f"    {n} losses: {loss_dist[n]}x")
+
+        # Bet size around switch
+        sb = ds.get("avg_size_before_switch", 0)
+        sa = ds.get("avg_size_after_switch", 0)
+        if sb > 0 or sa > 0:
+            print(f"\n  Avg bet size before switch: ${sb:.2f}")
+            print(f"  Avg bet size after switch:  ${sa:.2f}")
+
+        # Market outcome at switch
+        sfm = ds.get("switch_follows_market", 0)
+        sam = ds.get("switch_against_market", 0)
+        stotal = sfm + sam
+        if stotal > 0:
+            print("\n  Switch direction vs last market outcome:")
+            print(
+                f"    Follows market (momentum): "
+                f"{sfm} ({sfm / stotal * 100:.1f}%)"
+            )
+            print(
+                f"    Against market (reversal):  "
+                f"{sam} ({sam / stotal * 100:.1f}%)"
+            )
 
     # Verdict
     print("\n--- Verdict ---")
