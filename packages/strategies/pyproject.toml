@@ -8,6 +8,7 @@ dependencies = ["pandas>=3.0.0", "polymarket-algo-core", "polymarket-algo-indica
 streak_reversal = "polymarket_algo.strategies:StreakReversalStrategy"
 candle_direction = "polymarket_algo.strategies:CandleDirectionStrategy"
 copytrade = "polymarket_algo.strategies:CopytradeStrategy"
+btc_momentum = "polymarket_algo.strategies:BTCMomentumStrategy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/polymarket_algo"]

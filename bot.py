@@ -14,7 +14,21 @@ from datetime import datetime
 from src.config import LOCAL_TZ, TIMEZONE_NAME, Config
 from src.core.polymarket import PolymarketClient
 from src.core.trader import LiveTrader, PaperTrader, TradingState
-from src.strategies.streak import evaluate, kelly_size
+from src.strategies.streak import evaluate as streak_evaluate
+from src.strategies.streak import kelly_size
+
+# Lazy-loaded to avoid import error when not used
+_momentum_evaluate = None
+
+
+def _get_momentum_evaluate():
+    global _momentum_evaluate
+    if _momentum_evaluate is None:
+        from src.strategies.momentum import evaluate as _meval
+
+        _momentum_evaluate = _meval
+    return _momentum_evaluate
+
 
 running = True
 
@@ -102,6 +116,12 @@ Related Commands:
         help="Set starting bankroll (overrides saved state)",
     )
     parser.add_argument(
+        "--strategy",
+        choices=["streak", "momentum"],
+        default="streak",
+        help="Trading strategy: streak (reversal) or momentum (BTC price)",
+    )
+    parser.add_argument(
         "--max-bets",
         type=int,
         metavar="N",
@@ -145,7 +165,11 @@ Related Commands:
     log(f"Limits: max_bets={max_daily_bets}/day, max_loss=${max_daily_loss}")
     log(f"Timezone: {TIMEZONE_NAME}")
 
-    log(f"Strategy: streak trigger={trigger}, bet=${bet_amount:.2f}")
+    strategy_name = args.strategy
+    log(
+        f"Strategy: {strategy_name}"
+        + (f" (trigger={trigger})" if strategy_name == "streak" else " (BTC price momentum)")
+    )
     log(f"Bankroll: ${state.bankroll:.2f}")
     log(f"Limits: max {Config.MAX_DAILY_BETS} bets/day, max ${Config.MAX_DAILY_LOSS} loss/day")
     log("")
@@ -208,19 +232,21 @@ Related Commands:
                 time.sleep(1)
                 continue
 
-            # === GET RECENT OUTCOMES ===
-            log("🔍 Fetching recent outcomes...")
-            outcomes = client.get_recent_outcomes(count=trigger + 2)
-            if len(outcomes) < trigger:
-                log(f"⚠️  Only {len(outcomes)} recent outcomes, need {trigger}")
-                bet_timestamps.add(target_ts)  # skip this window
-                time.sleep(5)
-                continue
-
-            log(f"📊 Recent outcomes: {' → '.join(o.upper() for o in outcomes)}")
-
             # === EVALUATE STRATEGY ===
-            sig = evaluate(outcomes, trigger=trigger)
+            if strategy_name == "momentum":
+                log("🔍 Fetching BTC price data...")
+                momentum_eval = _get_momentum_evaluate()
+                sig = momentum_eval()
+            else:
+                log("🔍 Fetching recent outcomes...")
+                outcomes = client.get_recent_outcomes(count=trigger + 2)
+                if len(outcomes) < trigger:
+                    log(f"⚠️  Only {len(outcomes)} recent outcomes, need {trigger}")
+                    bet_timestamps.add(target_ts)  # skip this window
+                    time.sleep(5)
+                    continue
+                log(f"📊 Recent outcomes: {' → '.join(o.upper() for o in outcomes)}")
+                sig = streak_evaluate(outcomes, trigger=trigger)
 
             if not sig.should_bet:
                 log(f"🟡 No signal: {sig.reason}")
