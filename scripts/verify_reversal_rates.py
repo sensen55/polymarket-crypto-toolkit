@@ -243,10 +243,19 @@ def print_results(results: dict, total_candles: int, date_range: str, timeframe:
 def main():
     df, timeframe = fetch_data()
 
-    # Date range
+    # Date range — filter to valid range to avoid out-of-range Timestamp errors
     if "open_time" in df.columns:
-        times = pd.to_datetime(df["open_time"])
-        date_range = f"{times.min().date()} to {times.max().date()}"
+        times = pd.to_datetime(df["open_time"], utc=True)
+        min_date = pd.Timestamp("2015-01-01", tz="UTC")
+        max_date = pd.Timestamp("2030-01-01", tz="UTC")
+        valid = times[(times >= min_date) & (times <= max_date)]
+        if len(valid) > 0:
+            date_range = f"{valid.min().date()} to {valid.max().date()}"
+            # Also filter the dataframe itself
+            mask = (times >= min_date) & (times <= max_date)
+            df = df[mask].reset_index(drop=True)
+        else:
+            date_range = "unknown"
     else:
         date_range = "unknown"
 
