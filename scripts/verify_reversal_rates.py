@@ -79,6 +79,12 @@ def fetch_5m_from_binance_vision() -> pd.DataFrame | None:
         return None
 
     df = pd.concat(all_frames, ignore_index=True)
+    # Ensure open_time is numeric before datetime conversion to filter bad values
+    df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
+    # Filter out timestamps outside reasonable range (2015-01-01 to 2030-01-01 in ms)
+    min_ts = int(datetime(2015, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    max_ts = int(datetime(2030, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    df = df[(df["open_time"] >= min_ts) & (df["open_time"] <= max_ts)]
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -109,6 +115,14 @@ def fetch_data() -> tuple[pd.DataFrame, str]:
     if cache_5m.exists():
         print(f"[+] Loading cached 5m data from {cache_5m}")
         df = pd.read_parquet(cache_5m)
+        # Filter out any rows with out-of-range timestamps
+        times = pd.to_datetime(df["open_time"], utc=True)
+        min_date = pd.Timestamp("2015-01-01", tz="UTC")
+        max_date = pd.Timestamp("2030-01-01", tz="UTC")
+        bad = (times < min_date) | (times > max_date)
+        if bad.any():
+            print(f"    Filtered {bad.sum():,} rows with out-of-range timestamps")
+            df = df[~bad].reset_index(drop=True)
         print(f"    {len(df):,} candles loaded")
         return df, "5m"
 
