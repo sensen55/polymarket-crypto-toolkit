@@ -1,0 +1,99 @@
+services:
+  # ── Paper Trading Bot ──────────────────────────────────
+  bot-paper:
+    build: .
+    command: ["bot.py", "--paper"]
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Live Trading Bot (use with caution) ────────────────
+  bot-live:
+    build: .
+    command: ["bot.py", "--live"]
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles: ["live"]  # Only starts with: docker compose --profile live up
+
+  # ── Momentum Strategy (Paper) ──────────────────────────
+  bot-momentum:
+    build: .
+    command: ["bot.py", "--paper", "--strategy", "momentum"]
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles: ["momentum"]
+
+  # ── Copy Trading Bot ───────────────────────────────────
+  copybot:
+    build: .
+    command: ["copybot_v2.py", "--paper"]
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles: ["copybot"]
+
+  # ── Backtest ───────────────────────────────────────────
+  backtest:
+    build: .
+    command: ["scripts/backtest.py"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    profiles: ["tools"]
+
+  # ── Backtest Sweep ─────────────────────────────────────
+  backtest-sweep:
+    build: .
+    command: ["scripts/run_backtests.py"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    profiles: ["tools"]
+
+  # ── Wallet Analyzer ────────────────────────────────────
+  analyze-wallet:
+    build: .
+    command: ["scripts/analyze_wallet.py"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    profiles: ["tools"]
+
+  # ── Data Fetcher ───────────────────────────────────────
+  fetch-data:
+    build: .
+    command: ["scripts/fetch_data.py"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    profiles: ["tools"]
