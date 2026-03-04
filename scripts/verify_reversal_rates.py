@@ -151,8 +151,8 @@ def analyze_streaks(df: pd.DataFrame) -> dict:
     doji_mask = close == open_
     doji_count = doji_mask.sum()
     if doji_count > 0:
-        direction[doji_mask] = 0
-        direction = direction.replace(0, method="ffill").fillna(1).astype(int)
+        direction[doji_mask] = pd.NA
+        direction = direction.ffill().fillna(1).astype(int)
         print(f"    Doji candles (close==open): {doji_count:,} → treated as continuation")
 
     directions = direction.values
